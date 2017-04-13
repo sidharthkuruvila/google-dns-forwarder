@@ -29,8 +29,8 @@ type google_dns_response = {
   questions: (question_response list [@default []]) [@key "Question"];
   answers: (answer_response list [@default []]) [@key "Answer"];
   additional: (answer_response list [@default []]) [@key "Additional"];
-  authorities: (answer_response list [@default []]) [@key "Authority"]
-  
+  authorities: (answer_response list [@default []]) [@key "Authority"];
+  comment: (string [@default ""]) [@key "Comment"]
 } [@@deriving yojson]
 
 (*
@@ -92,10 +92,7 @@ exception ForwarderException
 
 let parse_response str =
   let json = Yojson.Safe.from_string str in
-  let r = google_dns_response_of_yojson json in
-  match r with
-    | Result.Ok r -> r
-    | Result.Error err -> raise ForwarderException
+  google_dns_response_of_yojson json
 
 let read_question question_response = 
   {
@@ -126,7 +123,7 @@ let parse_soa data =
 let read_answer answer_response =
   let record_type = match int_to_record_type answer_response.ar_typ with 
     | Some record_type -> record_type
-    | None -> Lwt_io.printf "No record type found of type %d" answer_response.ar_typ; raise ForwarderException in
+    | None -> Printf.printf "No record type found of type %d" answer_response.ar_typ; raise ForwarderException in
   let data_str = answer_response.data in
   let rrtype, rdata = match record_type with 
     | R_A -> (RR_A, A (Ipaddr.V4.of_string_exn data_str))
@@ -161,7 +158,10 @@ let get_google_dns_record id typ name =
   Client.get (Uri.of_string url) >>= fun (resp, body) ->
   body |> Cohttp_lwt_body.to_string >>= fun body ->
   let parsed_response = parse_response body in
-  return (create_response id parsed_response)
+  match parsed_response with 
+    | Ok parsed_response -> return (Some (create_response id parsed_response))
+    | Error err -> (Lwt_io.printf "Failed to parse google response with body %s" body >>= fun() -> return None)
+  
 
 (* check db first, then fall back to resolver on error *)
 let process db resolver ~src ~dst packet =
@@ -185,8 +185,9 @@ let process db resolver ~src ~dst packet =
             else 
               (get_google_dns_record packet.id q.q_type q.q_name)
 
-            >>= fun result ->
-             return (Some (Dns.Query.answer_of_response result))
+            >>= function
+              | Some result -> return (Some (Dns.Query.answer_of_response result))
+              | None -> return None
       end
       | _::_::_ -> return None
 
